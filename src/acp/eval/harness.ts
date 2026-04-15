@@ -220,7 +220,7 @@ async function runMockEval(
         transcriptToolCalls.push({
           name: call.name,
           args: call.args ?? {},
-          result: normalizeMcpToolResult(result),
+          result: normalizeMcpToolResult(result as { content?: unknown; isError?: boolean }),
         });
         continue;
       }
