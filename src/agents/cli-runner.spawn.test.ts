@@ -240,6 +240,130 @@ describe("runCliAgent spawn path", () => {
     expect(input.argv).not.toContain("hi");
   });
 
+  it("retries Claude once without --setting-sources when the local CLI rejects that flag", async () => {
+    supervisorSpawnMock
+      .mockResolvedValueOnce(
+        createManagedRun({
+          reason: "exit",
+          exitCode: 1,
+          exitSignal: null,
+          durationMs: 50,
+          stdout: "",
+          stderr: "error: unknown option '--setting-sources'",
+          timedOut: false,
+          noOutputTimedOut: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        createManagedRun({
+          reason: "exit",
+          exitCode: 0,
+          exitSignal: null,
+          durationMs: 50,
+          stdout: [
+            JSON.stringify({ type: "init", session_id: "session-compat" }),
+            JSON.stringify({
+              type: "result",
+              session_id: "session-compat",
+              result: "compat ok",
+            }),
+          ].join("\n"),
+          stderr: "",
+          timedOut: false,
+          noOutputTimedOut: false,
+        }),
+      );
+
+    const result = await executePreparedCliRun(
+      buildPreparedCliRunContext({
+        provider: "claude-cli",
+        model: "sonnet",
+        runId: "run-claude-setting-sources-compat",
+        backend: {
+          args: [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--setting-sources",
+            "user",
+            "--permission-mode",
+            "bypassPermissions",
+          ],
+        },
+      }),
+    );
+
+    expect(result.text).toBe("compat ok");
+    expect(supervisorSpawnMock).toHaveBeenCalledTimes(2);
+    const firstInput = supervisorSpawnMock.mock.calls[0]?.[0] as { argv?: string[] };
+    const secondInput = supervisorSpawnMock.mock.calls[1]?.[0] as { argv?: string[] };
+    expect(firstInput.argv).toContain("--setting-sources");
+    expect(secondInput.argv).not.toContain("--setting-sources");
+    expect(secondInput.argv).not.toContain("user");
+  });
+
+  it("retries Claude once without --plugin-dir when the local CLI rejects that flag", async () => {
+    supervisorSpawnMock
+      .mockResolvedValueOnce(
+        createManagedRun({
+          reason: "exit",
+          exitCode: 1,
+          exitSignal: null,
+          durationMs: 50,
+          stdout: "",
+          stderr: "error: unknown option '--plugin-dir'",
+          timedOut: false,
+          noOutputTimedOut: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        createManagedRun({
+          reason: "exit",
+          exitCode: 0,
+          exitSignal: null,
+          durationMs: 50,
+          stdout: [
+            JSON.stringify({ type: "init", session_id: "session-plugin-compat" }),
+            JSON.stringify({
+              type: "result",
+              session_id: "session-plugin-compat",
+              result: "plugin compat ok",
+            }),
+          ].join("\n"),
+          stderr: "",
+          timedOut: false,
+          noOutputTimedOut: false,
+        }),
+      );
+
+    const result = await executePreparedCliRun(
+      buildPreparedCliRunContext({
+        provider: "claude-cli",
+        model: "sonnet",
+        runId: "run-claude-plugin-dir-compat",
+        backend: {
+          args: [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--plugin-dir",
+            "/tmp/compat-plugin",
+            "--permission-mode",
+            "bypassPermissions",
+          ],
+        },
+      }),
+    );
+
+    expect(result.text).toBe("plugin compat ok");
+    expect(supervisorSpawnMock).toHaveBeenCalledTimes(2);
+    const firstInput = supervisorSpawnMock.mock.calls[0]?.[0] as { argv?: string[] };
+    const secondInput = supervisorSpawnMock.mock.calls[1]?.[0] as { argv?: string[] };
+    expect(firstInput.argv).toContain("--plugin-dir");
+    expect(secondInput.argv).not.toContain("--plugin-dir");
+    expect(secondInput.argv).not.toContain("/tmp/compat-plugin");
+  });
+
   it("passes OpenClaw skills to Claude as a session plugin", async () => {
     const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-cli-skills-"));
     const skillDir = path.join(workspaceDir, "skills", "weather");

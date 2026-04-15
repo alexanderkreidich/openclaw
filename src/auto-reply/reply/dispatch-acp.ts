@@ -38,6 +38,8 @@ let dispatchAcpSessionRuntimePromise: Promise<
 > | null = null;
 let dispatchAcpTtsRuntimePromise: Promise<typeof import("./dispatch-acp-tts.runtime.js")> | null =
   null;
+let acpSessionAdapterPromise: Promise<typeof import("../../agents/acp-session-adapter.js")> | null =
+  null;
 
 function loadDispatchAcpManagerRuntime() {
   dispatchAcpManagerRuntimePromise ??= import("./dispatch-acp-manager.runtime.js");
@@ -52,6 +54,11 @@ function loadDispatchAcpSessionRuntime() {
 function loadDispatchAcpTtsRuntime() {
   dispatchAcpTtsRuntimePromise ??= import("./dispatch-acp-tts.runtime.js");
   return dispatchAcpTtsRuntimePromise;
+}
+
+function loadAcpSessionAdapter() {
+  acpSessionAdapterPromise ??= import("../../agents/acp-session-adapter.js");
+  return acpSessionAdapterPromise;
 }
 
 type DispatchProcessedRecorder = (
@@ -297,12 +304,30 @@ export async function tryDispatchAcpReply(params: {
 
   const { getAcpSessionManager } = await loadDispatchAcpManagerRuntime();
   const acpManager = getAcpSessionManager();
-  const acpResolution = acpManager.resolveSession({
+  let acpResolution = acpManager.resolveSession({
     cfg: params.cfg,
     sessionKey,
   });
   if (acpResolution.kind === "none") {
-    return null;
+    // Attempt auto-initialization when acp.defaultAgent is configured.
+    const adapter = await loadAcpSessionAdapter();
+    if (!adapter.shouldAutoInitAcpSession(params.cfg)) {
+      return null;
+    }
+    const initResult = await adapter.autoInitializeAcpSession({
+      cfg: params.cfg,
+      sessionKey,
+      accountId: normalizeOptionalString(params.ctx.AccountId),
+    });
+    if (!initResult.ok) {
+      logVerbose(`acp-dispatch: auto-init failed for ${sessionKey}: ${initResult.error}`);
+      return null;
+    }
+    // Re-resolve — initializeSession wrote ACP metadata to the session store.
+    acpResolution = acpManager.resolveSession({ cfg: params.cfg, sessionKey });
+    if (acpResolution.kind !== "ready") {
+      return null;
+    }
   }
   const canonicalSessionKey = acpResolution.sessionKey;
 

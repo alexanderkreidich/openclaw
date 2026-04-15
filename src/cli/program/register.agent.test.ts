@@ -109,6 +109,30 @@ describe("registerAgentCommands", () => {
     );
   });
 
+  it("forwards --thread-parent to agentCliCommand", async () => {
+    await runCli([
+      "agent",
+      "--message",
+      "hi",
+      "--agent",
+      "claude",
+      "--channel",
+      "discord",
+      "--thread-parent",
+      "msg-123",
+    ]);
+
+    expect(agentCliCommandMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "claude",
+        channel: "discord",
+        threadParent: "msg-123",
+      }),
+      runtime,
+      { deps: true },
+    );
+  });
+
   it("runs agents add and computes hasFlags based on explicit options", async () => {
     await runCli(["agents", "add", "alpha"]);
     expect(agentsAddCommandMock).toHaveBeenNthCalledWith(

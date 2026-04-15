@@ -91,6 +91,21 @@ describe("ensureAcpWorkspaceContext", () => {
     expect(content).toContain("openclaw_models_list");
   });
 
+  it("includes ACP delegation routing and no-poll rules", async () => {
+    await ensureAcpWorkspaceContext(tmpDir);
+    const content = await fs.readFile(path.join(tmpDir, "CLAUDE.md"), "utf-8");
+
+    expect(content).toContain("## Delegation Rules");
+    expect(content).toContain('If the user explicitly says "Do this in Claude Code"');
+    expect(content).toContain("omit `agentId` to use the configured default agent");
+    expect(content).toContain(
+      "use it for ordinary delegation requests instead of raw `sessions_spawn`",
+    );
+    expect(content).toContain("do not substitute built-in WebSearch/openclaw_web_search");
+    expect(content).toContain("do not poll sub-agents in a loop");
+    expect(content).toContain("not ACP harness discovery");
+  });
+
   it("includes identity section with agent name when provided", async () => {
     await ensureAcpWorkspaceContext(tmpDir, {
       agentIdentity: { name: "Skredik", emoji: "🦞" },
@@ -115,7 +130,7 @@ describe("ensureAcpWorkspaceContext", () => {
     const content = await fs.readFile(path.join(tmpDir, "CLAUDE.md"), "utf-8");
 
     expect(content).toContain("## Heartbeat Protocol");
-    expect(content).toContain("HEARTBEAT_OK");
+    expect(content).toContain("reply with exactly `HEARTBEAT_OK` and nothing else");
     expect(content).toContain("HEARTBEAT.md");
   });
 
@@ -133,10 +148,23 @@ describe("ensureAcpWorkspaceContext", () => {
     expect(content).toContain("## Output Directives");
     expect(content).toContain("MEDIA:");
     expect(content).toContain("[[audio_as_voice]]");
-    expect(content).toContain("NO_REPLY");
+    expect(content).toContain("[[reply_to_current]]` MUST be the very first token");
+    expect(content).toContain("output exactly `NO_REPLY` and nothing else");
+    expect(content).toContain("openclaw_image_generate");
+    expect(content).toContain("openclaw_tts");
     expect(content).toContain("## Execution Bias");
     expect(content).toContain("## Safety");
     expect(content).toContain("## Memory");
+    expect(content).toContain("use `openclaw_read_history` before answering");
+  });
+
+  it("includes close-vs-followup session lifecycle guidance", async () => {
+    await ensureAcpWorkspaceContext(tmpDir);
+    const content = await fs.readFile(path.join(tmpDir, "CLAUDE.md"), "utf-8");
+
+    expect(content).toContain("When the user confirms completion");
+    expect(content).toContain("off-topic request outside your scope");
+    expect(content).toContain("Do NOT close the session while still working");
   });
 
   it("includes runtime info when agentId is provided", async () => {

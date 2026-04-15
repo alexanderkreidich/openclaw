@@ -115,6 +115,9 @@ const CLI_ENV_AUTH_LOG_KEYS = [
 ] as const;
 
 const CLI_BACKEND_PRESERVE_ENV = "OPENCLAW_LIVE_CLI_BACKEND_PRESERVE_ENV";
+const CLAUDE_CLI_BACKEND_ID = "claude-cli";
+const CLAUDE_SETTING_SOURCES_ARG = "--setting-sources";
+const CLAUDE_PLUGIN_DIR_ARG = "--plugin-dir";
 
 function parseCliBackendPreserveEnv(raw: string | undefined): Set<string> {
   const trimmed = raw?.trim();
@@ -150,6 +153,66 @@ function listPresentCliAuthEnvKeys(env: Record<string, string | undefined>): str
 
 function formatCliEnvKeyList(keys: readonly string[]): string {
   return keys.length > 0 ? keys.join(",") : "none";
+}
+
+function stripClaudeSettingSourcesArgs(args: string[]): string[] {
+  const normalized: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === CLAUDE_SETTING_SOURCES_ARG) {
+      const maybeValue = args[index + 1];
+      if (typeof maybeValue === "string" && !maybeValue.startsWith("-")) {
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith(`${CLAUDE_SETTING_SOURCES_ARG}=`)) {
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return normalized;
+}
+
+function stripClaudePluginDirArgs(args: string[]): string[] {
+  const normalized: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === CLAUDE_PLUGIN_DIR_ARG) {
+      const maybeValue = args[index + 1];
+      if (typeof maybeValue === "string" && !maybeValue.startsWith("-")) {
+        index += 1;
+      }
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return normalized;
+}
+
+function stripClaudeUnsupportedArgs(args: string[], errorText: string): string[] | null {
+  if (errorText.includes(`unknown option '${CLAUDE_SETTING_SOURCES_ARG}'`)) {
+    return stripClaudeSettingSourcesArgs(args);
+  }
+  if (errorText.includes(`unknown option '${CLAUDE_PLUGIN_DIR_ARG}'`)) {
+    return stripClaudePluginDirArgs(args);
+  }
+  return null;
+}
+
+function shouldRetryClaudeWithoutSettingSources(params: {
+  backendId: string;
+  args: string[];
+  errorText: string;
+}): boolean {
+  if (params.backendId !== CLAUDE_CLI_BACKEND_ID) {
+    return false;
+  }
+  const nextArgs = stripClaudeUnsupportedArgs(params.args, params.errorText);
+  if (!nextArgs || nextArgs.length === params.args.length) {
+    return false;
+  }
+  return true;
 }
 
 export function buildCliEnvAuthLog(childEnv: Record<string, string>): string {
@@ -311,85 +374,117 @@ export async function executePreparedCliRun(
           timeoutMs: params.timeoutMs,
           useResume,
         });
-        const streamingParser =
-          backend.output === "jsonl"
-            ? createCliJsonlStreamingParser({
-                backend,
-                providerId: context.backendResolved.id,
-                onAssistantDelta: ({ text, delta }) => {
-                  emitAgentEvent({
-                    runId: params.runId,
-                    stream: "assistant",
-                    data: {
-                      text: applyPluginTextReplacements(
-                        text,
-                        context.backendResolved.textTransforms?.output,
-                      ),
-                      delta: applyPluginTextReplacements(
-                        delta,
-                        context.backendResolved.textTransforms?.output,
-                      ),
-                    },
-                  });
-                },
-              })
-            : null;
         const supervisor = executeDeps.getProcessSupervisor();
         const scopeKey = buildCliSupervisorScopeKey({
           backend,
           backendId: context.backendResolved.id,
           cliSessionId: useResume ? resolvedSessionId : undefined,
         });
+        const attemptedArgs = new Set<string>();
+        let currentArgs = args;
+        let result: Awaited<ReturnType<Awaited<ReturnType<typeof supervisor.spawn>>["wait"]>>;
+        let stdout = "";
+        let stderr = "";
+        let lastManagedRunPid: number | undefined;
 
-        const managedRun = await supervisor.spawn({
-          sessionId: params.sessionId,
-          backendId: context.backendResolved.id,
-          scopeKey,
-          replaceExistingScope: Boolean(useResume && scopeKey),
-          mode: "child",
-          argv: [backend.command, ...args],
-          timeoutMs: params.timeoutMs,
-          noOutputTimeoutMs,
-          cwd: context.workspaceDir,
-          env,
-          input: stdinPayload,
-          onStdout: streamingParser ? (chunk: string) => streamingParser.push(chunk) : undefined,
-        });
-        const replyBackendHandle = params.replyOperation
-          ? {
-              kind: "cli" as const,
-              cancel: () => {
-                managedRun.cancel("manual-cancel");
-              },
-              isStreaming: () => false,
-            }
-          : undefined;
-        if (replyBackendHandle) {
-          params.replyOperation?.attachBackend(replyBackendHandle);
-        }
-        const abortManagedRun = () => {
-          managedRun.cancel("manual-cancel");
-        };
-        params.abortSignal?.addEventListener("abort", abortManagedRun, { once: true });
-        if (params.abortSignal?.aborted) {
-          abortManagedRun();
-        }
-        let result: Awaited<ReturnType<typeof managedRun.wait>>;
-        try {
-          result = await managedRun.wait();
-        } finally {
+        // Claude Code 1.0.120 and older reject --setting-sources entirely.
+        // Retry once without that flag so older local CLI installs still work.
+        for (;;) {
+          attemptedArgs.add(JSON.stringify(currentArgs));
+          const streamingParser =
+            backend.output === "jsonl"
+              ? createCliJsonlStreamingParser({
+                  backend,
+                  providerId: context.backendResolved.id,
+                  onAssistantDelta: ({ text, delta }) => {
+                    emitAgentEvent({
+                      runId: params.runId,
+                      stream: "assistant",
+                      data: {
+                        text: applyPluginTextReplacements(
+                          text,
+                          context.backendResolved.textTransforms?.output,
+                        ),
+                        delta: applyPluginTextReplacements(
+                          delta,
+                          context.backendResolved.textTransforms?.output,
+                        ),
+                      },
+                    });
+                  },
+                })
+              : null;
+          const managedRun = await supervisor.spawn({
+            sessionId: params.sessionId,
+            backendId: context.backendResolved.id,
+            scopeKey,
+            replaceExistingScope: Boolean(useResume && scopeKey),
+            mode: "child",
+            argv: [backend.command, ...currentArgs],
+            timeoutMs: params.timeoutMs,
+            noOutputTimeoutMs,
+            cwd: context.workspaceDir,
+            env,
+            input: stdinPayload,
+            onStdout: streamingParser ? (chunk: string) => streamingParser.push(chunk) : undefined,
+          });
+          lastManagedRunPid = managedRun.pid;
+          const replyBackendHandle = params.replyOperation
+            ? {
+                kind: "cli" as const,
+                cancel: () => {
+                  managedRun.cancel("manual-cancel");
+                },
+                isStreaming: () => false,
+              }
+            : undefined;
           if (replyBackendHandle) {
-            params.replyOperation?.detachBackend(replyBackendHandle);
+            params.replyOperation?.attachBackend(replyBackendHandle);
           }
-          params.abortSignal?.removeEventListener("abort", abortManagedRun);
-        }
-        streamingParser?.finish();
-        if (params.abortSignal?.aborted && result.reason === "manual-cancel") {
-          throw createCliAbortError();
-        }
+          const abortManagedRun = () => {
+            managedRun.cancel("manual-cancel");
+          };
+          params.abortSignal?.addEventListener("abort", abortManagedRun, { once: true });
+          if (params.abortSignal?.aborted) {
+            abortManagedRun();
+          }
+          try {
+            result = await managedRun.wait();
+          } finally {
+            if (replyBackendHandle) {
+              params.replyOperation?.detachBackend(replyBackendHandle);
+            }
+            params.abortSignal?.removeEventListener("abort", abortManagedRun);
+            streamingParser?.finish();
+          }
 
-        const stdout = result.stdout.trim();
-        const stderr = result.stderr.trim();
+          if (params.abortSignal?.aborted && result.reason === "manual-cancel") {
+            throw createCliAbortError();
+          }
+
+          stdout = result.stdout.trim();
+          stderr = result.stderr.trim();
+          if (
+            (result.exitCode !== 0 || result.reason !== "exit") &&
+            shouldRetryClaudeWithoutSettingSources({
+              backendId: context.backendResolved.id,
+              args: currentArgs,
+              errorText: stderr || stdout,
+            })
+          ) {
+            const nextArgs =
+              stripClaudeUnsupportedArgs(currentArgs, stderr || stdout) ?? currentArgs;
+            const nextArgsKey = JSON.stringify(nextArgs);
+            if (nextArgs.length !== currentArgs.length && !attemptedArgs.has(nextArgsKey)) {
+              cliBackendLog.warn(
+                "claude-cli rejected an unsupported compatibility flag; retrying once without it",
+              );
+              currentArgs = nextArgs;
+              continue;
+            }
+          }
+          break;
+        }
         if (logOutputText) {
           if (stdout) {
             cliBackendLog.info(`cli stdout:\n${stdout}`);
@@ -411,7 +506,7 @@ export async function executePreparedCliRun(
           if (result.reason === "no-output-timeout" || result.noOutputTimedOut) {
             const timeoutReason = `CLI produced no output for ${Math.round(noOutputTimeoutMs / 1000)}s and was terminated.`;
             cliBackendLog.warn(
-              `cli watchdog timeout: provider=${params.provider} model=${context.modelId} session=${resolvedSessionId ?? params.sessionId} noOutputTimeoutMs=${noOutputTimeoutMs} pid=${managedRun.pid ?? "unknown"}`,
+              `cli watchdog timeout: provider=${params.provider} model=${context.modelId} session=${resolvedSessionId ?? params.sessionId} noOutputTimeoutMs=${noOutputTimeoutMs} pid=${lastManagedRunPid ?? "unknown"}`,
             );
             if (params.sessionKey) {
               const stallNotice = [

@@ -367,6 +367,29 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain('Use `runtime: "subagent"` instead.');
   });
 
+  it("biases complex research requests toward delegation instead of parent-session web search", () => {
+    const prompt = buildAgentSystemPrompt({
+      workspaceDir: "/tmp/openclaw",
+      toolNames: ["sessions_spawn", "web_search", "subagents"],
+    });
+
+    expect(prompt).toContain(
+      "If the user asks you to research, investigate, compare options, or summarize a topic across multiple sources, delegate instead of doing repeated web_search/WebSearch calls inline from the parent session; prefer `openclaw_spawn_agent` when available, otherwise use `sessions_spawn`.",
+    );
+    expect(prompt).toContain(
+      "Do not use native WebSearch/WebFetch in the parent session as a substitute for delegation",
+    );
+    expect(prompt).toContain(
+      "use that wrapper for ordinary delegation requests and reserve raw `sessions_spawn` for advanced spawn controls only",
+    );
+    expect(prompt).toContain(
+      "Search the web (Brave API). Use for quick lookups or follow-up verification",
+    );
+    expect(prompt).toContain(
+      'prefer `openclaw_spawn_agent`; use raw `sessions_spawn` with `runtime: "acp"` only when you need advanced controls',
+    );
+  });
+
   it("preserves tool casing in the prompt", () => {
     const prompt = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",

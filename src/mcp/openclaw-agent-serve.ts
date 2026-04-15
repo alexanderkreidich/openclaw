@@ -20,18 +20,42 @@ import { pathToFileURL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { resolveAgentDir } from "../agents/agent-scope.js";
 import {
   isToolWrappedWithBeforeToolCallHook,
   wrapToolWithBeforeToolCallHook,
 } from "../agents/pi-tools.before-tool-call.js";
 import type { AnyAgentTool } from "../agents/tools/common.js";
+import { createImageGenerateTool } from "../agents/tools/image-generate-tool.js";
+import { createSessionsSpawnTool } from "../agents/tools/sessions-spawn-tool.js";
+import { createWebFetchTool, createWebSearchTool } from "../agents/tools/web-tools.js";
 import { loadConfig } from "../config/config.js";
+import { resolveStorePath } from "../config/sessions/paths.js";
+import { loadSessionStore, resolveSessionStoreEntry } from "../config/sessions/store.js";
+import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { callGatewayCli } from "../gateway/call.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { routeLogsToStderr } from "../logging/console.js";
 import { resolvePluginTools } from "../plugins/tools.js";
+import { deliveryContextFromSession } from "../utils/delivery-context.js";
+import {
+  isDeliverableMessageChannel,
+  normalizeMessageChannel,
+  type GatewayMessageChannel,
+} from "../utils/message-channel.js";
 import { VERSION } from "../version.js";
+
+const HIDDEN_NATIVE_CLI_PLUGIN_TOOL_NAMES = new Set([
+  "sessions_spawn",
+  "image_generate",
+  "web_search",
+  "web_fetch",
+]);
+
+function shouldHideNativeCliToolName(name: string): boolean {
+  return HIDDEN_NATIVE_CLI_PLUGIN_TOOL_NAMES.has(name);
+}
 
 // ---------------------------------------------------------------------------
 // Session context from environment
@@ -92,12 +116,15 @@ export function resolveSessionContext(
 // Gateway call helper
 // ---------------------------------------------------------------------------
 
+export type OpenClawAgentGatewayCaller = typeof callGatewayCli;
+
 async function gw<T = Record<string, unknown>>(
   ctx: SessionContext,
   method: string,
   params?: unknown,
+  gatewayCaller: OpenClawAgentGatewayCaller = callGatewayCli,
 ): Promise<T> {
-  return await callGatewayCli<T>({
+  return await gatewayCaller<T>({
     method,
     params,
     ...(ctx.gatewayUrl ? { url: ctx.gatewayUrl } : {}),
@@ -116,6 +143,214 @@ function jsonContent(data: unknown) {
 function errorContent(err: unknown) {
   const text = typeof err === "string" ? err : `Error: ${formatErrorMessage(err)}`;
   return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+type SessionDeliveryTarget = {
+  deliveryContext: ReturnType<typeof deliveryContextFromSession>;
+  channel?: GatewayMessageChannel;
+  to?: string;
+  accountId?: string;
+  threadId?: string | number;
+};
+
+type MpcRuntimeContext = {
+  sessionEntry?: SessionEntry;
+  deliveryTarget: SessionDeliveryTarget;
+  agentDir?: string;
+  workspaceDir: string;
+  sessionId?: string;
+  agentChannel?: GatewayMessageChannel;
+  agentTo?: string;
+  agentThreadId?: string | number;
+  agentAccountId?: string;
+  agentGroupId?: string;
+  agentGroupChannel?: string;
+  agentGroupSpace?: string;
+};
+
+function readSessionEntry(_cfg: OpenClawConfig, sessionKey?: string): SessionEntry | undefined {
+  if (!sessionKey) {
+    return undefined;
+  }
+  try {
+    const store = loadSessionStore(resolveStorePath());
+    return resolveSessionStoreEntry({ store, sessionKey }).existing;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveSessionDeliveryTarget(entry?: SessionEntry): SessionDeliveryTarget {
+  const deliveryContext = deliveryContextFromSession(entry);
+  const rawChannel = deliveryContext?.channel;
+  const normalizedChannel = rawChannel
+    ? (normalizeMessageChannel(rawChannel) ?? rawChannel)
+    : undefined;
+  const channel =
+    normalizedChannel && isDeliverableMessageChannel(normalizedChannel)
+      ? normalizedChannel
+      : undefined;
+  const to = typeof deliveryContext?.to === "string" ? deliveryContext.to.trim() : undefined;
+  return {
+    deliveryContext,
+    channel,
+    to: to || undefined,
+    accountId: deliveryContext?.accountId,
+    threadId: deliveryContext?.threadId,
+  };
+}
+
+function resolveMcpRuntimeContext(cfg: OpenClawConfig, ctx: SessionContext): MpcRuntimeContext {
+  const sessionEntry = readSessionEntry(cfg, ctx.sessionKey);
+  const deliveryTarget = resolveSessionDeliveryTarget(sessionEntry);
+  const agentId = ctx.agentId?.trim() || undefined;
+  const agentDir = agentId ? resolveAgentDir(cfg, agentId) : undefined;
+  const normalizedChannel = deliveryTarget.deliveryContext?.channel
+    ? normalizeMessageChannel(deliveryTarget.deliveryContext.channel)
+    : undefined;
+  return {
+    sessionEntry,
+    deliveryTarget,
+    agentDir,
+    workspaceDir: process.cwd(),
+    sessionId: sessionEntry?.sessionId,
+    agentChannel: normalizedChannel as GatewayMessageChannel | undefined,
+    agentTo: deliveryTarget.deliveryContext?.to,
+    agentThreadId: deliveryTarget.deliveryContext?.threadId,
+    agentAccountId: deliveryTarget.deliveryContext?.accountId ?? ctx.accountId,
+    agentGroupId: sessionEntry?.groupId,
+    agentGroupChannel: sessionEntry?.groupChannel,
+    agentGroupSpace: sessionEntry?.space,
+  };
+}
+
+function resolveMcpInternalAgentTools(params: {
+  config: OpenClawConfig;
+  sessionContext: SessionContext;
+  agentTools?: AnyAgentTool[];
+}): AnyAgentTool[] {
+  if (params.agentTools) {
+    return params.agentTools;
+  }
+  const runtime = resolveMcpRuntimeContext(params.config, params.sessionContext);
+  return collectPresentTools([
+    createSessionsSpawnTool({
+      agentSessionKey: params.sessionContext.sessionKey,
+      agentChannel: runtime.agentChannel,
+      agentAccountId: runtime.agentAccountId,
+      agentTo: runtime.agentTo,
+      agentThreadId: runtime.agentThreadId,
+      agentGroupId: runtime.agentGroupId,
+      agentGroupChannel: runtime.agentGroupChannel,
+      agentGroupSpace: runtime.agentGroupSpace,
+      workspaceDir: runtime.workspaceDir,
+    }),
+    createImageGenerateTool({
+      config: params.config,
+      agentDir: runtime.agentDir,
+      workspaceDir: runtime.workspaceDir,
+    }),
+    createWebSearchTool({
+      config: params.config,
+    }),
+    createWebFetchTool({
+      config: params.config,
+    }),
+  ]);
+}
+
+function resolveMcpPluginTools(params: {
+  config: OpenClawConfig;
+  sessionContext: SessionContext;
+  pluginTools?: AnyAgentTool[];
+  existingToolNames?: Set<string>;
+}): AnyAgentTool[] {
+  const runtime = resolveMcpRuntimeContext(params.config, params.sessionContext);
+  const pluginTools =
+    params.pluginTools ??
+    resolvePluginTools({
+      context: {
+        config: params.config,
+        runtimeConfig: params.config,
+        workspaceDir: runtime.workspaceDir,
+        agentDir: runtime.agentDir,
+        agentId: params.sessionContext.agentId,
+        sessionKey: params.sessionContext.sessionKey,
+        sessionId: runtime.sessionId,
+        messageChannel: runtime.agentChannel,
+        agentAccountId: runtime.agentAccountId,
+        deliveryContext: runtime.deliveryTarget.deliveryContext,
+      },
+      existingToolNames: params.existingToolNames,
+      suppressNameConflicts: true,
+    });
+  return pluginTools
+    .filter((tool) => !shouldHideNativeCliToolName(tool.name))
+    .map((tool) => {
+      if (isToolWrappedWithBeforeToolCallHook(tool)) {
+        return tool;
+      }
+      return wrapToolWithBeforeToolCallHook(tool);
+    });
+}
+
+async function executeMcpInternalAgentTool(params: {
+  name: string;
+  args: Record<string, unknown>;
+  config: OpenClawConfig;
+  sessionContext: SessionContext;
+  agentTools?: AnyAgentTool[];
+}) {
+  const tool = resolveMcpInternalAgentTools(params).find((entry) => entry.name === params.name);
+  if (!tool) {
+    throw new Error(`OpenClaw MCP tool runtime missing internal tool: ${params.name}`);
+  }
+  return await tool.execute(`mcp-${params.name}-${Date.now()}`, params.args);
+}
+
+async function sendCurrentSessionReply(params: {
+  config: OpenClawConfig;
+  sessionContext: SessionContext;
+  message: string;
+  gatewayCaller?: OpenClawAgentGatewayCaller;
+}) {
+  if (!params.sessionContext.sessionKey) {
+    throw new Error("No session key — cannot determine conversation context");
+  }
+  const runtime = resolveMcpRuntimeContext(params.config, params.sessionContext);
+  const target = runtime.deliveryTarget;
+  if (!target.channel || !target.to) {
+    throw new Error("Current session has no deliverable reply target");
+  }
+  return await gw(
+    params.sessionContext,
+    "send",
+    {
+      channel: target.channel,
+      to: target.to,
+      message: params.message,
+      accountId: target.accountId ?? params.sessionContext.accountId,
+      threadId: target.threadId == null ? undefined : String(target.threadId),
+      sessionKey: params.sessionContext.sessionKey,
+      agentId: params.sessionContext.agentId,
+      idempotencyKey: crypto.randomUUID(),
+    },
+    params.gatewayCaller,
+  );
+}
+
+function toToolContent(result: { content?: unknown }) {
+  if (Array.isArray(result.content)) {
+    return { content: result.content };
+  }
+  const content = result.content;
+  const text =
+    typeof content === "string" ? content : content == null ? "" : JSON.stringify(content);
+  return textContent(text);
+}
+
+function collectPresentTools(tools: Array<AnyAgentTool | null | undefined>): AnyAgentTool[] {
+  return tools.filter((tool): tool is AnyAgentTool => Boolean(tool));
 }
 
 // ---------------------------------------------------------------------------
@@ -141,10 +376,15 @@ type ToolDef = {
   handler: (
     args: Record<string, unknown>,
     ctx: SessionContext,
-  ) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>;
+  ) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>;
 };
 
-function defineBuiltinTools(): ToolDef[] {
+function defineBuiltinTools(params: {
+  config: OpenClawConfig;
+  sessionContext: SessionContext;
+  agentTools?: AnyAgentTool[];
+  gatewayCaller?: OpenClawAgentGatewayCaller;
+}): ToolDef[] {
   return [
     // -- Messaging --
     {
@@ -167,7 +407,12 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["channel", "to", "message"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "send", { ...args, idempotencyKey: crypto.randomUUID() });
+        const result = await gw(
+          ctx,
+          "send",
+          { ...args, idempotencyKey: crypto.randomUUID() },
+          params.gatewayCaller,
+        );
         return jsonContent(result);
       },
     },
@@ -180,14 +425,11 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["message"],
       },
       handler: async (args, ctx) => {
-        if (!ctx.sessionKey) {
-          return errorContent("No session key — cannot determine conversation context");
-        }
-        const result = await gw(ctx, "agent", {
-          sessionKey: ctx.sessionKey,
-          message: args.message,
-          deliver: true,
-          idempotencyKey: crypto.randomUUID(),
+        const result = await sendCurrentSessionReply({
+          config: params.config,
+          sessionContext: ctx,
+          message: String(args.message),
+          gatewayCaller: params.gatewayCaller,
         });
         return jsonContent(result);
       },
@@ -204,10 +446,15 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["session_key"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "chat.history", {
-          sessionKey: args.session_key,
-          limit: args.limit ?? 20,
-        });
+        const result = await gw(
+          ctx,
+          "chat.history",
+          {
+            sessionKey: args.session_key,
+            limit: args.limit ?? 20,
+          },
+          params.gatewayCaller,
+        );
         return jsonContent(result);
       },
     },
@@ -223,13 +470,18 @@ function defineBuiltinTools(): ToolDef[] {
         },
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "sessions.list", {
-          limit: args.limit ?? 50,
-          search: args.search,
-          channel: args.channel,
-          includeDerivedTitles: true,
-          includeLastMessage: true,
-        });
+        const result = await gw(
+          ctx,
+          "sessions.list",
+          {
+            limit: args.limit ?? 50,
+            search: args.search,
+            channel: args.channel,
+            includeDerivedTitles: true,
+            includeLastMessage: true,
+          },
+          params.gatewayCaller,
+        );
         return jsonContent(result);
       },
     },
@@ -238,7 +490,8 @@ function defineBuiltinTools(): ToolDef[] {
       name: "openclaw_session_status",
       description: "Get current gateway and session status.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "status")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "status", undefined, params.gatewayCaller)),
     },
     {
       name: "openclaw_session_close",
@@ -252,38 +505,56 @@ function defineBuiltinTools(): ToolDef[] {
         if (!ctx.sessionKey) {
           return errorContent("No session key — cannot close session");
         }
-        if (args.message) {
-          await gw(ctx, "agent", {
-            sessionKey: ctx.sessionKey,
-            message: args.message,
-            deliver: true,
-            idempotencyKey: crypto.randomUUID(),
+        const runtime = resolveMcpRuntimeContext(params.config, ctx);
+        if (args.message && runtime.deliveryTarget.channel && runtime.deliveryTarget.to) {
+          await sendCurrentSessionReply({
+            config: params.config,
+            sessionContext: ctx,
+            message: typeof args.message === "string" ? args.message : "",
+            gatewayCaller: params.gatewayCaller,
           });
         }
-        await gw(ctx, "sessions.delete", { key: ctx.sessionKey, deleteTranscript: false });
+        await gw(
+          ctx,
+          "sessions.delete",
+          { key: ctx.sessionKey, deleteTranscript: false },
+          params.gatewayCaller,
+        );
         return textContent("Session closed successfully.");
       },
     },
     {
       name: "openclaw_spawn_agent",
-      description: "Spawn a new agent session to delegate a task.",
+      description:
+        'Spawn a new ACP child session to delegate a task. Use this for complex research or coding work, and for explicit requests like "Do this in Claude Code". This is the preferred delegation tool on the OpenClaw MCP surface; omit `agentId` to use the configured ACP default agent, and reserve raw `sessions_spawn` for advanced controls like thread/session binding or resume. For broad research/investigation requests, do this before using direct WebSearch yourself.',
       inputSchema: {
         type: "object",
         properties: {
-          agentId: { type: "string", description: "Agent ID or alias" },
+          agentId: {
+            type: "string",
+            description: "Agent ID or alias; omit to use the configured ACP default agent",
+          },
           task: { type: "string", description: "Task description" },
           thread: { type: "boolean", description: "Bind to a thread" },
         },
-        required: ["agentId", "task"],
+        required: ["task"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "agent", {
-          agentId: args.agentId,
-          task: args.task,
-          thread: args.thread ?? false,
-          idempotencyKey: crypto.randomUUID(),
+        const result = await executeMcpInternalAgentTool({
+          name: "sessions_spawn",
+          args: {
+            task: args.task,
+            ...(typeof args.agentId === "string" && args.agentId.trim()
+              ? { agentId: args.agentId }
+              : {}),
+            thread: args.thread ?? false,
+            runtime: "acp",
+          },
+          config: params.config,
+          sessionContext: ctx,
+          agentTools: params.agentTools,
         });
-        return jsonContent(result);
+        return toToolContent(result);
       },
     },
     // -- Scheduling --
@@ -291,7 +562,8 @@ function defineBuiltinTools(): ToolDef[] {
       name: "openclaw_cron_list",
       description: "List scheduled recurring tasks.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "cron.list")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "cron.list", undefined, params.gatewayCaller)),
     },
     {
       name: "openclaw_cron_add",
@@ -306,19 +578,22 @@ function defineBuiltinTools(): ToolDef[] {
         },
         required: ["name", "schedule", "task"],
       },
-      handler: async (args, ctx) => jsonContent(await gw(ctx, "cron.add", args)),
+      handler: async (args, ctx) =>
+        jsonContent(await gw(ctx, "cron.add", args, params.gatewayCaller)),
     },
     {
       name: "openclaw_cron_remove",
       description: "Remove a scheduled recurring task.",
       inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
-      handler: async (args, ctx) => jsonContent(await gw(ctx, "cron.remove", args)),
+      handler: async (args, ctx) =>
+        jsonContent(await gw(ctx, "cron.remove", args, params.gatewayCaller)),
     },
     {
       name: "openclaw_cron_run",
       description: "Manually trigger a scheduled task now.",
       inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
-      handler: async (args, ctx) => jsonContent(await gw(ctx, "cron.run", args)),
+      handler: async (args, ctx) =>
+        jsonContent(await gw(ctx, "cron.run", args, params.gatewayCaller)),
     },
     // -- Media --
     {
@@ -334,13 +609,14 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["prompt"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "agent", {
-          sessionKey: ctx.sessionKey,
-          tool: "image_generate",
-          toolInput: args,
-          idempotencyKey: crypto.randomUUID(),
+        const result = await executeMcpInternalAgentTool({
+          name: "image_generate",
+          args,
+          config: params.config,
+          sessionContext: ctx,
+          agentTools: params.agentTools,
         });
-        return jsonContent(result);
+        return toToolContent(result);
       },
     },
     {
@@ -354,7 +630,8 @@ function defineBuiltinTools(): ToolDef[] {
         },
         required: ["text"],
       },
-      handler: async (args, ctx) => jsonContent(await gw(ctx, "tts.convert", args)),
+      handler: async (args, ctx) =>
+        jsonContent(await gw(ctx, "tts.convert", args, params.gatewayCaller)),
     },
     // -- Web --
     {
@@ -369,13 +646,14 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["query"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "agent", {
-          sessionKey: ctx.sessionKey,
-          tool: "web_search",
-          toolInput: args,
-          idempotencyKey: crypto.randomUUID(),
+        const result = await executeMcpInternalAgentTool({
+          name: "web_search",
+          args,
+          config: params.config,
+          sessionContext: ctx,
+          agentTools: params.agentTools,
         });
-        return jsonContent(result);
+        return toToolContent(result);
       },
     },
     {
@@ -390,13 +668,14 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["url"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "agent", {
-          sessionKey: ctx.sessionKey,
-          tool: "web_fetch",
-          toolInput: args,
-          idempotencyKey: crypto.randomUUID(),
+        const result = await executeMcpInternalAgentTool({
+          name: "web_fetch",
+          args,
+          config: params.config,
+          sessionContext: ctx,
+          agentTools: params.agentTools,
         });
-        return jsonContent(result);
+        return toToolContent(result);
       },
     },
     // -- Nodes --
@@ -404,7 +683,8 @@ function defineBuiltinTools(): ToolDef[] {
       name: "openclaw_node_list",
       description: "List connected nodes and devices.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "node.list")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "node.list", undefined, params.gatewayCaller)),
     },
     {
       name: "openclaw_node_invoke",
@@ -419,19 +699,26 @@ function defineBuiltinTools(): ToolDef[] {
         required: ["nodeId", "command"],
       },
       handler: async (args, ctx) => {
-        const result = await gw(ctx, "node.invoke", {
-          ...args,
-          idempotencyKey: crypto.randomUUID(),
-        });
+        const result = await gw(
+          ctx,
+          "node.invoke",
+          {
+            ...args,
+            idempotencyKey: crypto.randomUUID(),
+          },
+          params.gatewayCaller,
+        );
         return jsonContent(result);
       },
     },
     // -- Agents --
     {
       name: "openclaw_agents_list",
-      description: "List available agents and their configurations.",
+      description:
+        "List configured OpenClaw agent ids and their configurations. This is for OpenClaw agent discovery, not ACP harness discovery, and not for polling loops.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "agents.list")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "agents.list", undefined, params.gatewayCaller)),
     },
     // -- Config & status --
     {
@@ -442,13 +729,15 @@ function defineBuiltinTools(): ToolDef[] {
         properties: { key: { type: "string", description: "Config key path" } },
         required: ["key"],
       },
-      handler: async (args, ctx) => jsonContent(await gw(ctx, "config.get", args)),
+      handler: async (args, ctx) =>
+        jsonContent(await gw(ctx, "config.get", args, params.gatewayCaller)),
     },
     {
       name: "openclaw_channels_status",
       description: "Check connectivity status of all configured channels.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "channels.status")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "channels.status", undefined, params.gatewayCaller)),
     },
     // -- Approvals --
     {
@@ -460,7 +749,7 @@ function defineBuiltinTools(): ToolDef[] {
       },
       handler: async (args, ctx) => {
         const method = args.kind === "plugin" ? "plugin.approval.list" : "exec.approval.list";
-        return jsonContent(await gw(ctx, method));
+        return jsonContent(await gw(ctx, method, undefined, params.gatewayCaller));
       },
     },
     {
@@ -477,7 +766,9 @@ function defineBuiltinTools(): ToolDef[] {
       },
       handler: async (args, ctx) => {
         const method = args.kind === "plugin" ? "plugin.approval.resolve" : "exec.approval.resolve";
-        return jsonContent(await gw(ctx, method, { id: args.id, decision: args.decision }));
+        return jsonContent(
+          await gw(ctx, method, { id: args.id, decision: args.decision }, params.gatewayCaller),
+        );
       },
     },
     // -- Models --
@@ -485,7 +776,8 @@ function defineBuiltinTools(): ToolDef[] {
       name: "openclaw_models_list",
       description: "List available AI models across all configured providers.",
       inputSchema: { type: "object", properties: {} },
-      handler: async (_args, ctx) => jsonContent(await gw(ctx, "models.list")),
+      handler: async (_args, ctx) =>
+        jsonContent(await gw(ctx, "models.list", undefined, params.gatewayCaller)),
     },
   ];
 }
@@ -497,37 +789,26 @@ function defineBuiltinTools(): ToolDef[] {
 export function createOpenClawAgentMcpServer(
   params: {
     config?: OpenClawConfig;
+    agentTools?: AnyAgentTool[];
     pluginTools?: AnyAgentTool[];
     sessionContext?: SessionContext;
+    gatewayCaller?: OpenClawAgentGatewayCaller;
   } = {},
 ): Server {
   const cfg = params.config ?? loadConfig();
   const ctx = params.sessionContext ?? resolveSessionContext();
 
-  const builtinTools = defineBuiltinTools();
-
-  // Resolve plugin tools
-  const pluginTools = (
-    params.pluginTools ??
-    resolvePluginTools({
-      context: { config: cfg },
-      suppressNameConflicts: true,
-    })
-  ).map((tool) => {
-    if (isToolWrappedWithBeforeToolCallHook(tool)) {
-      return tool;
-    }
-    return wrapToolWithBeforeToolCallHook(tool);
+  const builtinTools = defineBuiltinTools({
+    config: cfg,
+    sessionContext: ctx,
+    agentTools: params.agentTools,
+    gatewayCaller: params.gatewayCaller,
   });
 
   // Build combined tool map
   const builtinMap = new Map<string, ToolDef>();
   for (const tool of builtinTools) {
     builtinMap.set(tool.name, tool);
-  }
-  const pluginMap = new Map<string, AnyAgentTool>();
-  for (const tool of pluginTools) {
-    pluginMap.set(tool.name, tool);
   }
 
   const server = new Server(
@@ -536,23 +817,38 @@ export function createOpenClawAgentMcpServer(
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      ...builtinTools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-      })),
-      ...pluginTools.map((t) => ({
-        name: t.name,
-        description: t.description ?? "",
-        inputSchema: resolveJsonSchemaForTool(t),
-      })),
-    ],
+    tools: (() => {
+      const pluginTools = resolveMcpPluginTools({
+        config: cfg,
+        sessionContext: ctx,
+        pluginTools: params.pluginTools,
+        existingToolNames: new Set(builtinTools.map((tool) => tool.name)),
+      });
+      return [
+        ...builtinTools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+        ...pluginTools.map((t) => ({
+          name: t.name,
+          description: t.description ?? "",
+          inputSchema: resolveJsonSchemaForTool(t),
+        })),
+      ].filter((tool) => !shouldHideNativeCliToolName(tool.name));
+    })(),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const args = request.params.arguments ?? {};
     const name = request.params.name;
+
+    if (shouldHideNativeCliToolName(name)) {
+      return {
+        content: [{ type: "text", text: `Unknown tool: ${name}` }],
+        isError: true,
+      };
+    }
 
     // Check built-in tools first
     const builtin = builtinMap.get(name);
@@ -565,13 +861,20 @@ export function createOpenClawAgentMcpServer(
     }
 
     // Check plugin tools
+    const pluginMap = new Map<string, AnyAgentTool>();
+    for (const tool of resolveMcpPluginTools({
+      config: cfg,
+      sessionContext: ctx,
+      pluginTools: params.pluginTools,
+      existingToolNames: new Set(builtinTools.map((tool) => tool.name)),
+    })) {
+      pluginMap.set(tool.name, tool);
+    }
     const plugin = pluginMap.get(name);
     if (plugin) {
       try {
         const result = await plugin.execute(`mcp-${Date.now()}`, args);
-        return Array.isArray(result.content)
-          ? { content: result.content }
-          : textContent(String(result.content));
+        return toToolContent(result);
       } catch (err) {
         return errorContent(err);
       }
@@ -624,16 +927,21 @@ export async function serveOpenClawAgentMcp(): Promise<void> {
   await server.connect(transport);
 }
 
+export function isOpenClawAgentServeEntrypoint(importMetaUrl: string, entryArg?: string): boolean {
+  const resolvedEntryArg = entryArg ?? "";
+  const normalizedEntryArg = resolvedEntryArg.replaceAll("\\", "/");
+  return (
+    importMetaUrl === pathToFileURL(resolvedEntryArg).href ||
+    normalizedEntryArg.endsWith("/mcp/openclaw-agent-serve.js") ||
+    normalizedEntryArg.endsWith("/mcp/openclaw-agent-serve.ts")
+  );
+}
+
 // In bundled dist, tsdown may code-split this module into a separate chunk
 // whose import.meta.url differs from process.argv[1]. Match on filename
 // instead of strict URL equality so the entry point works in both source
 // and bundled layouts.
-const entryArg = process.argv[1] ?? "";
-if (
-  import.meta.url === pathToFileURL(entryArg).href ||
-  entryArg.endsWith("/mcp/openclaw-agent-serve.js") ||
-  entryArg.endsWith("/mcp/openclaw-agent-serve.ts")
-) {
+if (isOpenClawAgentServeEntrypoint(import.meta.url, process.argv[1])) {
   serveOpenClawAgentMcp().catch((err) => {
     process.stderr.write(`openclaw-agent-serve: ${formatErrorMessage(err)}\n`);
     process.exit(1);

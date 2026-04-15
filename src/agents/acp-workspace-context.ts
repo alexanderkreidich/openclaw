@@ -8,6 +8,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { HEARTBEAT_TOKEN, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { MCP_SESSION_CONTEXT_FILENAME } from "../mcp/openclaw-agent-serve.js";
 
@@ -32,7 +33,7 @@ export type AcpWorkspaceContextOptions = {
 
 const GENERATED_MARKER = "<!-- openclaw:generated -->";
 
-function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
+export function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
   const lines = [
     GENERATED_MARKER,
     "# OpenClaw Workspace",
@@ -79,7 +80,7 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
     "- `openclaw_conversations_list` — list available conversations",
     "",
     "### Delegation",
-    "- `openclaw_spawn_agent` — delegate work to a specialist sub-agent. Use when a task is better handled by a dedicated agent (research, coding, analysis). Provide a clear task description and let the sub-agent work independently.",
+    "- `openclaw_spawn_agent` — delegate work to a specialist ACP coding session. Use when a task is better handled by a dedicated agent (research, coding, analysis). This is the default delegation tool on this MCP surface; omit `agentId` to use the configured default agent, and reserve raw `sessions_spawn` for advanced controls like thread/session binding or resume. For broad research/investigation requests, call this before doing direct WebSearch yourself. Provide a clear task description and let the child session work independently.",
     "",
     "### Scheduling",
     "- `openclaw_cron_add` — schedule a recurring or one-shot task",
@@ -97,7 +98,7 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
     "",
     "### System",
     "- `openclaw_session_status` — get current session status and info",
-    "- `openclaw_agents_list` — list available agents",
+    "- `openclaw_agents_list` — list configured OpenClaw agent ids. This is for OpenClaw sub-agent discovery, not ACP harness discovery, and not for polling loops.",
     "- `openclaw_node_list` — list gateway nodes",
     "- `openclaw_node_invoke` — invoke a function on a gateway node",
     "- `openclaw_config_get` — read a config value",
@@ -116,8 +117,8 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
       "You receive periodic heartbeat polls. When a heartbeat arrives:",
       "",
       "1. Read HEARTBEAT.md for your checklist of periodic tasks.",
-      "2. If nothing needs attention, reply with exactly `HEARTBEAT_OK`.",
-      "3. If something needs attention (urgent email, upcoming calendar event, etc.), reply with the alert — do NOT include `HEARTBEAT_OK` when alerting.",
+      `2. If nothing needs attention, reply with exactly \`${HEARTBEAT_TOKEN}\` and nothing else.`,
+      `3. If something needs attention (urgent email, upcoming calendar event, etc.), reply with the alert and do NOT include \`${HEARTBEAT_TOKEN}\`.`,
       "4. Use heartbeats productively: batch periodic checks (email, calendar, mentions) and do background maintenance (memory review, file organization).",
       "",
     );
@@ -127,15 +128,26 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
   lines.push(
     "## Output Directives",
     "",
-    "- Include `MEDIA:<path-or-url>` in your reply to attach an image or file.",
-    "- Include `[[audio_as_voice]]` to have your reply delivered as voice audio via TTS.",
-    "- Include `[[reply_to_current]]` to reply in the same conversation the message came from.",
-    "- Reply with exactly `NO_REPLY` when you have nothing to say (e.g. silent processing).",
+    "- If replying in the current conversation or thread, `[[reply_to_current]]` MUST be the very first token in the assistant output with no text before it.",
+    "- Include `MEDIA:<path-or-url>` on its own line to attach an image, audio file, or other media.",
+    "- For direct image requests, call `openclaw_image_generate` and then include a standalone `MEDIA:` line for the generated `.png` or `.webp` asset.",
+    "- For voice-note requests, call `openclaw_tts`, include `[[audio_as_voice]]`, and include a standalone `MEDIA:` line for the generated audio file.",
+    `- For silent internal or scheduled follow-up work with no user-visible reply, output exactly \`${SILENT_REPLY_TOKEN}\` and nothing else.`,
     "",
   );
 
   // ── Execution Bias ──
   lines.push(
+    "## Delegation Rules",
+    "",
+    'If the user explicitly says "Do this in Claude Code", treat that as ACP delegation intent and call `openclaw_spawn_agent`.',
+    "For complex research, coding, or other long-running work, delegate early instead of doing all work inline.",
+    "When `openclaw_spawn_agent` is available, use it for ordinary delegation requests instead of raw `sessions_spawn`.",
+    "If the user asks you to research or investigate a topic across multiple sources, do not substitute built-in WebSearch/openclaw_web_search for delegation from the parent session.",
+    "Do not use `openclaw_agents_list` to discover ACP harness ids before calling `openclaw_spawn_agent`.",
+    "After spawning a child session, do not poll sub-agents in a loop.",
+    "Auto-announce is push-based. Wait for completion naturally and only do an on-demand status check when the user explicitly asks you to intervene or debug.",
+    "",
     "## Execution Bias",
     "",
     "Start working immediately. Use tools. Don't stop at plans or ask for confirmation before acting.",
@@ -163,6 +175,7 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
     "- Long-term: `MEMORY.md` — your curated memories.",
     "- Write things down. Memory does not survive session restarts — files do.",
     "- When someone says 'remember this', update `memory/YYYY-MM-DD.md` or the relevant file.",
+    "- If the user asks what was decided yesterday or in another session, use `openclaw_read_history` before answering.",
     "",
   );
 
@@ -172,7 +185,8 @@ function buildClaudeMdContent(options?: AcpWorkspaceContextOptions): string {
     "",
     "- `openclaw_session_close` — use this MCP tool to hand control back when your task is complete.",
     "When your task is complete, use `openclaw_session_close` to hand control back.",
-    "When you receive an off-topic request outside your scope, use `openclaw_session_close`.",
+    "When the user confirms completion (for example, 'all done' or 'that's perfect'), use `openclaw_session_close`.",
+    "When you receive an off-topic request outside your scope, use `openclaw_session_close` with a short handoff message.",
     "Do NOT close the session while still working on the task or handling follow-up questions.",
     "",
   );

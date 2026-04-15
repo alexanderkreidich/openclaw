@@ -46,6 +46,7 @@ export type AgentCliOpts = {
   replyTo?: string;
   replyChannel?: string;
   replyAccount?: string;
+  threadParent?: string;
   bestEffortDeliver?: boolean;
   lane?: string;
   runId?: string;
@@ -141,6 +142,7 @@ export async function agentViaGatewayCommand(opts: AgentCliOpts, runtime: Runtim
           channel,
           replyChannel: opts.replyChannel,
           replyAccountId: opts.replyAccount,
+          threadId: opts.threadParent,
           bestEffortDeliver: opts.bestEffortDeliver,
           timeout: timeoutSeconds,
           lane: opts.lane,
@@ -182,6 +184,7 @@ export async function agentCliCommand(opts: AgentCliOpts, runtime: RuntimeEnv, d
     ...opts,
     agentId: opts.agent,
     replyAccountId: opts.replyAccount,
+    threadId: opts.threadParent,
     cleanupBundleMcpOnRunEnd: opts.local === true,
   };
   if (opts.local === true) {

@@ -5,6 +5,13 @@ import { resolveBoundAcpThreadSessionKey } from "./commands-acp/targets.js";
 import { emitResetCommandHooks, type ResetCommandAction } from "./commands-reset-hooks.js";
 import type { CommandHandlerResult, HandleCommandsParams } from "./commands-types.js";
 
+let acpSessionAdapterPromise: Promise<typeof import("../../agents/acp-session-adapter.js")> | null =
+  null;
+function loadAcpSessionAdapter() {
+  acpSessionAdapterPromise ??= import("../../agents/acp-session-adapter.js");
+  return acpSessionAdapterPromise;
+}
+
 function applyAcpResetTailContext(ctx: HandleCommandsParams["ctx"], resetTail: string): void {
   const mutableCtx = ctx as Record<string, unknown>;
   mutableCtx.Body = resetTail;
@@ -64,6 +71,35 @@ export async function maybeHandleResetCommand(
       shouldContinue: false,
       reply: { text: "⚠️ ACP session reset failed. Check /acp status and try again." },
     };
+  }
+
+  // When ACP auto-init is configured and no bound ACP session exists,
+  // create a new ACP session instead of falling through to embedded Pi.
+  const adapter = await loadAcpSessionAdapter();
+  if (adapter.shouldAutoInitAcpSession(params.cfg)) {
+    const initResult = await adapter.autoInitializeAcpSession({
+      cfg: params.cfg,
+      sessionKey: params.sessionKey,
+      accountId: params.command.to,
+    });
+    if (initResult.ok) {
+      logVerbose(
+        `reset: auto-initialized ACP session for ${params.sessionKey} (agent=${initResult.agentId})`,
+      );
+      if (resetTail) {
+        applyAcpResetTailContext(params.ctx, resetTail);
+        if (params.rootCtx && params.rootCtx !== params.ctx) {
+          applyAcpResetTailContext(params.rootCtx, resetTail);
+        }
+        return { shouldContinue: false };
+      }
+      return {
+        shouldContinue: false,
+        reply: { text: "✅ ACP session initialized." },
+      };
+    }
+    logVerbose(`reset: ACP auto-init failed for ${params.sessionKey}: ${initResult.error}`);
+    // Fall through to embedded Pi path on failure.
   }
 
   const targetSessionEntry = params.sessionStore?.[params.sessionKey] ?? params.sessionEntry;

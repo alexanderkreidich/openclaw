@@ -440,7 +440,8 @@ export function buildAgentSystemPrompt(params: {
     ls: "List directory contents",
     exec: "Run shell commands (pty available for TTY-required CLIs)",
     process: "Manage background exec sessions",
-    web_search: "Search the web (Brave API)",
+    web_search:
+      "Search the web (Brave API). Use for quick lookups or follow-up verification; if the user asks for broad research/investigation, spawn a sub-agent instead of keeping the parent session in search loops.",
     web_fetch: "Fetch and extract readable content from a URL",
     // Channel docking: add login tools here when a channel needs interactive linking.
     browser: "Control web browser",
@@ -456,7 +457,7 @@ export function buildAgentSystemPrompt(params: {
     sessions_history: "Fetch history for another session/sub-agent",
     sessions_send: "Send a message to another session/sub-agent",
     sessions_spawn: acpSpawnRuntimeEnabled
-      ? 'Spawn an isolated sub-agent or ACP coding session (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list)'
+      ? 'Low-level spawn primitive for isolated sub-agent or ACP coding sessions (runtime="acp" requires `agentId` unless `acp.defaultAgent` is configured; ACP harness ids follow acp.allowedAgents, not agents_list). If `openclaw_spawn_agent` is available, reserve raw `sessions_spawn` for advanced controls like thread/session binding, resumeSessionId, streamTo, or explicit non-default agent selection.'
       : "Spawn an isolated sub-agent session",
     subagents: "List, steer, or kill sub-agent runs for this requester session",
     session_status:
@@ -657,9 +658,12 @@ export function buildAgentSystemPrompt(params: {
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
     "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
+    "If the user asks you to research, investigate, compare options, or summarize a topic across multiple sources, delegate instead of doing repeated web_search/WebSearch calls inline from the parent session; prefer `openclaw_spawn_agent` when available, otherwise use `sessions_spawn`.",
+    "Do not use native WebSearch/WebFetch in the parent session as a substitute for delegation on those complex research requests.",
+    "When the OpenClaw MCP surface offers `openclaw_spawn_agent`, use that wrapper for ordinary delegation requests and reserve raw `sessions_spawn` for advanced spawn controls only.",
     ...(acpHarnessSpawnAllowed
       ? [
-          'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',
+          'For requests like "do this in codex/claude code/cursor/gemini" or similar ACP harnesses, treat it as ACP harness intent and prefer `openclaw_spawn_agent`; use raw `sessions_spawn` with `runtime: "acp"` only when you need advanced controls such as thread/session binding, resumeSessionId, streamTo, or an explicit non-default agent.',
           'On Discord, default ACP harness requests to thread-bound persistent sessions (`thread: true`, `mode: "session"`) unless the user asks otherwise.',
           "Set `agentId` explicitly unless `acp.defaultAgent` is configured, and do not route ACP harness requests through `subagents`/`agents_list` or local PTY exec flows.",
           'For ACP harness thread spawns, do not call `message` with `action=thread-create`; use `sessions_spawn` (`runtime: "acp"`, `thread: true`) as the single thread creation path.',

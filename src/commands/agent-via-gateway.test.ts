@@ -140,6 +140,33 @@ describe("agentCliCommand", () => {
     });
   });
 
+  it("forwards --thread-parent to gateway delivery context", async () => {
+    await withTempStore(async () => {
+      mockGatewaySuccessReply();
+
+      await agentCliCommand(
+        {
+          message: "hi",
+          agent: "main",
+          sessionId: "sess-1",
+          channel: "discord",
+          threadParent: "msg-123",
+        },
+        runtime,
+      );
+
+      expect(callGateway).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "agent",
+          params: expect.objectContaining({
+            channel: "discord",
+            threadId: "msg-123",
+          }),
+        }),
+      );
+    });
+  });
+
   it("does not force bundle MCP cleanup on gateway fallback", async () => {
     await withTempStore(async () => {
       callGateway.mockRejectedValue(new Error("gateway not connected"));
