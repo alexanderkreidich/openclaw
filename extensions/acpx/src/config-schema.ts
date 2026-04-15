@@ -29,11 +29,13 @@ export type AcpxPluginConfig = {
   permissionMode?: AcpxPermissionMode;
   nonInteractivePermissions?: AcpxNonInteractivePermissionPolicy;
   pluginToolsMcpBridge?: boolean;
+  openClawAgentMcp?: boolean;
   strictWindowsCmdWrapper?: boolean;
   timeoutSeconds?: number;
   queueOwnerTtlSeconds?: number;
   mcpServers?: Record<string, McpServerConfig>;
   agents?: Record<string, { command: string }>;
+  probeAgent?: string;
 };
 
 export type ResolvedAcpxPluginConfig = {
@@ -42,6 +44,7 @@ export type ResolvedAcpxPluginConfig = {
   permissionMode: AcpxPermissionMode;
   nonInteractivePermissions: AcpxNonInteractivePermissionPolicy;
   pluginToolsMcpBridge: boolean;
+  openClawAgentMcp: boolean;
   strictWindowsCmdWrapper: boolean;
   timeoutSeconds?: number;
   queueOwnerTtlSeconds: number;
@@ -51,6 +54,7 @@ export type ResolvedAcpxPluginConfig = {
   };
   mcpServers: Record<string, McpServerConfig>;
   agents: Record<string, string>;
+  probeAgent?: string;
 };
 
 const nonEmptyTrimmedString = (message: string) =>
@@ -88,6 +92,7 @@ export const AcpxPluginConfigSchema = z.strictObject({
     })
     .optional(),
   pluginToolsMcpBridge: z.boolean({ error: "pluginToolsMcpBridge must be a boolean" }).optional(),
+  openClawAgentMcp: z.boolean({ error: "openClawAgentMcp must be a boolean" }).optional(),
   strictWindowsCmdWrapper: z
     .boolean({ error: "strictWindowsCmdWrapper must be a boolean" })
     .optional(),
@@ -108,6 +113,7 @@ export const AcpxPluginConfigSchema = z.strictObject({
       }),
     )
     .optional(),
+  probeAgent: nonEmptyTrimmedString("probeAgent must be a non-empty string").optional(),
 });
 
 export function createAcpxPluginConfigSchema(): OpenClawPluginConfigSchema {

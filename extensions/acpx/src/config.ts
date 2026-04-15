@@ -25,6 +25,7 @@ export {
 } from "./config-schema.js";
 
 export const ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME = "openclaw-plugin-tools";
+export const ACPX_OPENCLAW_AGENT_MCP_SERVER_NAME = "openclaw-agent";
 
 function isAcpxPluginRoot(dir: string): boolean {
   return (
@@ -172,21 +173,60 @@ export function resolvePluginToolsMcpServerConfig(
   };
 }
 
+/**
+ * Resolves the MCP server config for the unified OpenClaw agent MCP server.
+ * This server exposes the full OpenClaw tool surface (messaging, scheduling,
+ * media, web, nodes, agents, config, approvals, models) plus plugin tools.
+ *
+ * Session context is read from a workspace file (.openclaw/mcp-session-context.json)
+ * written by the gateway before ACP session creation (env vars as fallback).
+ */
+export function resolveOpenClawAgentMcpServerConfig(
+  moduleUrl: string = import.meta.url,
+): McpServerConfig {
+  const pluginRoot = resolveAcpxPluginRoot(moduleUrl);
+  const openClawRoot = resolveOpenClawRoot(pluginRoot);
+  const distEntry = path.join(openClawRoot, "dist", "mcp", "openclaw-agent-serve.js");
+  if (fs.existsSync(distEntry)) {
+    return {
+      command: process.execPath,
+      args: [distEntry],
+    };
+  }
+  const sourceEntry = path.join(openClawRoot, "src", "mcp", "openclaw-agent-serve.ts");
+  return {
+    command: process.execPath,
+    args: ["--import", "tsx", sourceEntry],
+  };
+}
+
 function resolveConfiguredMcpServers(params: {
   mcpServers?: Record<string, McpServerConfig>;
   pluginToolsMcpBridge: boolean;
+  openClawAgentMcp: boolean;
   moduleUrl?: string;
 }): Record<string, McpServerConfig> {
   const resolved = { ...params.mcpServers };
-  if (!params.pluginToolsMcpBridge) {
-    return resolved;
-  }
-  if (resolved[ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME]) {
-    throw new Error(
-      `mcpServers.${ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME} is reserved when pluginToolsMcpBridge=true`,
+  if (params.pluginToolsMcpBridge) {
+    if (resolved[ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME]) {
+      throw new Error(
+        `mcpServers.${ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME} is reserved when pluginToolsMcpBridge=true`,
+      );
+    }
+    resolved[ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME] = resolvePluginToolsMcpServerConfig(
+      params.moduleUrl,
     );
   }
-  resolved[ACPX_PLUGIN_TOOLS_MCP_SERVER_NAME] = resolvePluginToolsMcpServerConfig(params.moduleUrl);
+  if (params.openClawAgentMcp) {
+    if (resolved[ACPX_OPENCLAW_AGENT_MCP_SERVER_NAME]) {
+      throw new Error(
+        `mcpServers.${ACPX_OPENCLAW_AGENT_MCP_SERVER_NAME} is reserved when openClawAgentMcp=true`,
+      );
+    }
+    resolved[ACPX_OPENCLAW_AGENT_MCP_SERVER_NAME] = resolveOpenClawAgentMcpServerConfig(
+      params.moduleUrl,
+    );
+  }
   return resolved;
 }
 
@@ -217,9 +257,11 @@ export function resolveAcpxPluginConfig(params: {
   const cwd = path.resolve(normalized.cwd?.trim() || fallbackCwd);
   const stateDir = path.resolve(normalized.stateDir?.trim() || path.join(workspaceDir, "state"));
   const pluginToolsMcpBridge = normalized.pluginToolsMcpBridge === true;
+  const openClawAgentMcp = normalized.openClawAgentMcp === true;
   const mcpServers = resolveConfiguredMcpServers({
     mcpServers: normalized.mcpServers,
     pluginToolsMcpBridge,
+    openClawAgentMcp,
     moduleUrl: params.moduleUrl,
   });
   const agents = Object.fromEntries(
@@ -236,6 +278,7 @@ export function resolveAcpxPluginConfig(params: {
     nonInteractivePermissions:
       normalized.nonInteractivePermissions ?? DEFAULT_NON_INTERACTIVE_POLICY,
     pluginToolsMcpBridge,
+    openClawAgentMcp,
     strictWindowsCmdWrapper:
       normalized.strictWindowsCmdWrapper ?? DEFAULT_STRICT_WINDOWS_CMD_WRAPPER,
     timeoutSeconds: normalized.timeoutSeconds ?? DEFAULT_ACPX_TIMEOUT_SECONDS,
@@ -246,5 +289,6 @@ export function resolveAcpxPluginConfig(params: {
     },
     mcpServers,
     agents,
+    probeAgent: normalized.probeAgent?.trim() || undefined,
   };
 }

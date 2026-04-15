@@ -62,6 +62,30 @@ describe("embedded acpx plugin config", () => {
     expect(server.args?.length).toBeGreaterThan(0);
   });
 
+  it("injects the unified openclaw-agent MCP server when explicitly enabled", () => {
+    const resolved = resolveAcpxPluginConfig({
+      rawConfig: {
+        openClawAgentMcp: true,
+      },
+      workspaceDir: "/tmp/openclaw-acpx",
+    });
+
+    const server = resolved.mcpServers["openclaw-agent"];
+    expect(server).toBeDefined();
+    expect(server.command).toBe(process.execPath);
+    expect(Array.isArray(server.args)).toBe(true);
+    expect(server.args?.length).toBeGreaterThan(0);
+  });
+
+  it("does not inject openclaw-agent MCP server by default", () => {
+    const resolved = resolveAcpxPluginConfig({
+      rawConfig: undefined,
+      workspaceDir: "/tmp/openclaw-acpx",
+    });
+
+    expect(resolved.mcpServers["openclaw-agent"]).toBeUndefined();
+  });
+
   it("keeps the runtime json schema in sync with the manifest config schema", () => {
     const pluginRoot = resolveAcpxPluginRoot();
     const manifest = JSON.parse(

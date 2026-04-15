@@ -27,6 +27,9 @@
       "pluginToolsMcpBridge": {
         "type": "boolean"
       },
+      "openClawAgentMcp": {
+        "type": "boolean"
+      },
       "strictWindowsCmdWrapper": {
         "type": "boolean"
       },
@@ -75,6 +78,10 @@
           },
           "required": ["command"]
         }
+      },
+      "probeAgent": {
+        "type": "string",
+        "minLength": 1
       }
     }
   },
@@ -100,6 +107,11 @@
       "help": "Default off. When enabled, inject the built-in OpenClaw plugin-tools MCP server into embedded ACP sessions so ACP agents can call plugin-registered tools.",
       "advanced": true
     },
+    "openClawAgentMcp": {
+      "label": "OpenClaw Agent MCP",
+      "help": "Default off. When enabled, inject the unified OpenClaw agent MCP server into ACP sessions, exposing the full OpenClaw tool surface (messaging, scheduling, media, web, nodes, agents, config, approvals, models) plus plugin tools.",
+      "advanced": true
+    },
     "strictWindowsCmdWrapper": {
       "label": "Strict Windows cmd Wrapper",
       "help": "Legacy compatibility field. The current embedded acpx/runtime package uses its own Windows command resolution behavior. Setting this to false is accepted for compatibility and logged as ignored.",
@@ -123,6 +135,11 @@
     "agents": {
       "label": "Agent Commands",
       "help": "Optional per-agent command overrides for the embedded ACP runtime.",
+      "advanced": true
+    },
+    "probeAgent": {
+      "label": "Probe Agent",
+      "help": "Agent name used for the startup availability probe. Defaults to codex.",
       "advanced": true
     }
   },

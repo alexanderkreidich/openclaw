@@ -55,6 +55,7 @@ function createDefaultRuntime(params: AcpxRuntimeFactoryParams): AcpxRuntimeLike
       params.pluginConfig.timeoutSeconds != null
         ? params.pluginConfig.timeoutSeconds * 1_000
         : undefined,
+    probeAgent: params.pluginConfig.probeAgent,
   });
 }
 
